@@ -58,4 +58,137 @@ def save_to_google_sheet(score, reason):
         # 깃허브 Secrets에서 불러오기
         json_str = os.getenv("GSPREAD_JSON")
         if not json_str:
-            print("❌ G
+            print("❌ GSPREAD_JSON 환경 변수가 없습니다. 구글 시트 저장을 건너뜁니다.")
+            return
+            
+        json_data = json.loads(json_str)
+        gc = gspread.service_account_from_dict(json_data)
+        
+        # 'BRI_Result' 라는 이름의 구글 시트 열기
+        sh = gc.open("BRI_Result").sheet1
+        
+        # 한국 시간(KST)으로 변환
+        kst = timezone(timedelta(hours=9))
+        current_time = datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 시트에 행 추가
+        sh.append_row([current_time, score, reason])
+        print(f"✅ 구글 스프레드시트 기록 완료: {current_time} | 점수: {score}")
+        
+    except Exception as e:
+        print(f"❌ 구글 스프레드시트 저장 에러: {e}")
+
+def get_chrome_options():
+    options = uc.ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--incognito")
+    options.add_argument("--disable-cache")
+    options.add_argument("--window-size=1920,1080")
+    return options
+
+def crawl_dcinside(gallery_id, is_mgallery=True):
+    options = get_chrome_options()
+    timestamp = int(time.time())
+    url = f"https://gall.dcinside.com/mgallery/board/lists?id={gallery_id}&t={timestamp}" if is_mgallery else f"https://gall.dcinside.com/board/lists/?id={gallery_id}&t={timestamp}"
+        
+    titles = []
+    driver = None
+    try:
+        driver = uc.Chrome(options=options, version_main=148)
+        driver.get(url)
+        time.sleep(3)
+        
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        post_rows = soup.select("tr.ub-content.us-post")
+        for row in post_rows:
+            num_text = row.select_one(".gall_num")
+            if num_text and num_text.text.strip().isdigit():
+                title_elem = row.select_one(".gall_tit.ub-word a:not(.reply_numbox)")
+                if title_elem:
+                    t = title_elem.text.strip()
+                    if t: titles.append((t, f"디시_{gallery_id}"))
+    except Exception as e:
+        print(f"   ❌ 디시인사이드({gallery_id}) 오류: {e}")
+    finally:
+        if driver: driver.quit()
+    return titles
+
+def crawl_dynamic_sources():
+    options = get_chrome_options()
+    fmkorea_titles, stocktwits_titles, yahoo_titles = [], [], []
+    
+    driver = None
+    try:
+        driver = uc.Chrome(options=options, version_main=148)
+        
+        try:
+            driver.get("https://www.fmkorea.com/stock")
+            time.sleep(3)
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            for elem in soup.select(".title a"):
+                t = elem.get_text().strip()
+                if "comment_link" in elem.get('class', []) or not t: continue
+                if len(t) > 3: fmkorea_titles.append((t, "에펨코리아"))
+        except: pass
+
+        try:
+            driver.get("https://stocktwits.com/symbol/SPY")
+            time.sleep(6)
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            messages = soup.select("div[class*='MessageCard_body']")
+            for msg in messages:
+                t = msg.text.strip()
+                if t and len(t) > 6: stocktwits_titles.append((t, "스톡트위츠_SPY"))
+        except: pass
+
+    except Exception as e:
+        print(f"   ❌ 동적 크롤링 오류: {e}")
+    finally:
+        if driver: driver.quit()
+            
+    return fmkorea_titles, stocktwits_titles, [], yahoo_titles
+
+
+# --- 메인 실행 로직 ---
+if __name__ == "__main__":
+    print("🚀 BRI 데이터 수집 시작...")
+    
+    # 1. 크롤링 실행 (기존 로직 사용)
+    dc_titles = crawl_dcinside("tenbagger", is_mgallery=True)
+    fm_titles, st_titles, _, _ = crawl_dynamic_sources()
+    
+    all_titles = dc_titles + fm_titles + st_titles
+    print(f"총 {len(all_titles)}개의 데이터를 수집했습니다.")
+    
+    if len(all_titles) > 0:
+        # 타이틀 텍스트만 하나로 합치기
+        text_for_ai = "\n".join([f"- {t[0]}" for t in all_titles])
+        
+        # 2. OpenAI GPT에 분석 요청
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o", # 또는 gpt-3.5-turbo 등 사용하는 모델명
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"다음 커뮤니티 글들을 분석해줘:\n\n{text_for_ai}"}
+                ],
+                response_format={ "type": "json_object" }
+            )
+            
+            # 결과 파싱
+            result_json = json.loads(response.choices[0].message.content)
+            final_score = result_json.get("insanity_score", 50)
+            final_reason = result_json.get("reason", "이유 분석 실패")
+            
+            print(f"분석 완료! 점수: {final_score}")
+            print(f"이유: {final_reason}")
+            
+            # 3. 분석 결과를 구글 시트로 전송 (여기서 함수 호출!)
+            save_to_google_sheet(final_score, final_reason)
+
+        except Exception as e:
+            print(f"❌ AI 분석 중 에러 발생: {e}")
+    else:
+        print("수집된 데이터가 없어 분석을 종료합니다.")
