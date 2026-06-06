@@ -4,162 +4,58 @@ from openai import OpenAI
 import json
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+import gspread # 구글 스프레드시트 라이브러리 추가
 
-# 환경 변수에서 API 키를 읽어오도록 수정 (보안 강화)
+# 환경 변수 설정
 API_KEY = os.getenv("OPENAI_API_KEY") 
-CSV_FILE_PATH = "global_buffett_ridicule_index.csv"
-
 client = OpenAI(api_key=API_KEY)
 
-# SYSTEM_PROMPT는 기존과 동일하게 유지...
-SYSTEM_PROMPT = SYSTEM_PROMPT = """
-
+# SYSTEM_PROMPT 설정
+SYSTEM_PROMPT = """
 너는 글로벌 주식/코인 커뮤니티의 글을 분석하여 시장의 심리 지수를 산출하는 냉철한 한국인 퀀트 분석 AI다.
-
 표면적인 단어에 속지 말고, 한국 커뮤니티 특유의 '반어법, 자조, 블랙 코미디'를 완벽하게 파악하여 0~100점을 부여하라.
-
 정치관련 얘기, 정부에 대한 불만 등은 모두 50점을 부여 할 것.
 
-
-
 [한국 커뮤니티 은어 및 맥락 해독 사전 - 절대 엄수]
-
 - "역시 워렌버핏이야". 결국 돌고돌아 워렌버핏 <-- 이새끼가 옳았음(욕이 붙었다고 꼭 비난은 아님을 명시하라)", "결국 가치투자가 승리네", "워렌버핏 승", "버크셔의 승리다, 버크셔가 옳았다" 등 가치투자와 워렌버핏을 찬양하는 글. (0~30점)
-
 - "돈복사 라면서요", "천하무적 이라며" 등 과거형/원망형 어미: 폭락에 대한 극도의 배신감과 절망(0~30점).
-
 - "마1", "마2", "마6": 마이너스(-) 하락 퍼센트를 의미함. 폭락을 뜻하므로 절대 '상승/급등'으로 해석 금지(0~30점).
-
 - "헷지로 로또 샀다", "한강 간다", "구조대 언제 오냐": 극도의 공포와 체념을 뜻하는 블랙 코미디(0~30점).
-
 - 숏(하락) 배팅자들이 롱(상승) 배팅자들을 조롱하는 글 (예: "롱충이들 퇴학ㅋㅋ", "숏 존나 맛있다 ㅋㅋㅋ"): 롱 투자자들을 조롱하거나 숏투자자들이 수익이 나서 좋아하는 현상은 탐욕이 아닌 시장이 폭락 중이라는 증거이므로 탐욕이 아닌 '공포장/하락장' 신호로 간주하여 점수를 낮출 것(0~30점).
-
 - "버핏 옹 폼 다 죽었네", "가치투자 왜함?": 전통적 투자를 비웃는 극도의 오만과 탐욕. (70~100점)
-
 - "돈복사기 가동", "무지성 풀매수", "영끌" "전재산 꼴아서 빚투할걸": 단기 급등에 취해 리스크를 무시하는 포모(FOMO) 현상. (70~100점)
-
 - "숏충이들 한강물 따뜻하냐", "공매도 세력 멸망ㅋㅋ", "대풀롱" "황말올" 등  롱(상승) 배팅자들이 하락 배팅자들을 조롱하는 상황. 시장이 과열되었다는 강력한 탐욕 신호. (70~100점)
-
 - "신고가 갱신", "무조건 더 간다": 끝없는 상승을 믿는 맹목적 낙관론.(70점~100점)
 
-
-
 [50점 중심의 영점 조절 및 평가 가이드라인]
-
 - 극도의 공포가 감지되면 0점이나 그에 가까운 낮은 점수를 부여해도 된다. 반대로 극도의 환희나 탐욕이 감지되면 100점이나 그에 가까운 점수를 부여해도 된다.
-
 - 48 ~ 52점 (중립/무관): 단순 시황, 일상 토론, 선거/정치/사회 이슈 등 투자 심리와 무관한 글.
-
 - 53 ~ 100점 (광기어린 탐욕/포모): 탐욕, 포모 등 가치투자를 비웃거나 워렌 버핏 조롱하는 글 또는 장투 비하, 레버리지 몰빵, 단기 옵션 도박, 무지성 '가즈아'가 감지될수록 점수를 올려라.
-
-예시 : "지금 안 사면 벼락거지 됨", "무지성 롱 가즈아", "가치투자(버핏) 왜 함? 단타가 최고지" 등 상승장에 취해 도박적이고 오만한 태도를 보일 때. (강도에 따라 세밀하게 분산)
-
 - 0 ~ 47점 (비명/공포/절망): 주가 하락에 비관하거나, 폭락에 대한 두려움을 나타내는 글 또는 워렌 버핏을 찬양하고 가치투자를 찬양하는 글.
 
-예시 : 계좌 녹음, 손실 인증, 폭락에 대한 두려움, 장투의 후회, 하락장에서의 자조 섞인 농담. 앞으로 워렌 버핏 투자를 따라갈거다. 가치투자가 최고다., 아가리 쩌억 벌리고 매수 대기한다. (강도에 따라 세밀하게 분산)
-
-
-
 [점수 분산 강제 규칙 (Score Granularity)]
-
 - 30, 50, 85 같은 특정 숫자에만 점수를 몰아서 채점(Quantization)하지 마라. 13, 27, 62, 98 등 0~100 사이의 숫자를 고해상도로 골고루 사용하라.
 
-
-
 [논리적 일관성 유지]
-
 - 요약(reason)이 "분노, 불만, 절망"인데 점수를 50점 이상(탐욕)으로 주는 논리적 모순을 절대 범하지 마라.
 
-
-
 반드시 아래 JSON 포맷으로만 출력:
-
 {"buffett_ridicule": true, "reason": "심리 상태 요약 1문장 (한국어)", "insanity_score": int}
-
 """
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# 서버용 크롬 옵션 생성 함수
-def get_chrome_options():
-    options = uc.ChromeOptions()
-    options.add_argument("--headless=new") # 서버용 필수: 화면 없는 모드
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--incognito")
-    options.add_argument("--disable-cache")
-    options.add_argument("--window-size=1920,1080")
-    return options
-
-def crawl_dcinside(gallery_id, is_mgallery=True):
-    options = get_chrome_options()
-    timestamp = int(time.time())
-    url = f"https://gall.dcinside.com/mgallery/board/lists?id={gallery_id}&t={timestamp}" if is_mgallery else f"https://gall.dcinside.com/board/lists/?id={gallery_id}&t={timestamp}"
-        
-    titles = []
-    driver = None
+# 구글 스프레드시트 전송 함수 추가
+def save_to_google_sheet(score, reason):
     try:
-        driver = uc.Chrome(options=options, version_main=148)
-        driver.get(url)
-        time.sleep(3)
-        
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        post_rows = soup.select("tr.ub-content.us-post")
-        for row in post_rows:
-            num_text = row.select_one(".gall_num")
-            if num_text and num_text.text.strip().isdigit():
-                title_elem = row.select_one(".gall_tit.ub-word a:not(.reply_numbox)")
-                if title_elem:
-                    t = title_elem.text.strip()
-                    if t: titles.append((t, f"디시_{gallery_id}"))
-    except Exception as e:
-        print(f"   ❌ 디시인사이드({gallery_id}) 오류: {e}")
-    finally:
-        if driver: driver.quit()
-    return titles
-
-def crawl_dynamic_sources():
-    options = get_chrome_options()
-    fmkorea_titles, stocktwits_titles, yahoo_titles = [], [], []
-    
-    driver = None
-    try:
-        driver = uc.Chrome(options=options, version_main=148)
-        
-        # 1. 에펨코리아
-        try:
-            driver.get("https://www.fmkorea.com/stock")
-            time.sleep(3)
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            for elem in soup.select(".title a"):
-                t = elem.get_text().strip()
-                if "comment_link" in elem.get('class', []) or not t: continue
-                if len(t) > 3: fmkorea_titles.append((t, "에펨코리아"))
-        except: pass
-
-        # 2. 스톡트위츠
-        try:
-            driver.get("https://stocktwits.com/symbol/SPY")
-            time.sleep(6)
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            messages = soup.select("div[class*='MessageCard_body']")
-            for msg in messages:
-                t = msg.text.strip()
-                if t and len(t) > 6: stocktwits_titles.append((t, "스톡트위츠_SPY"))
-        except: pass
-
-    except Exception as e:
-        print(f"   ❌ 동적 크롤링 오류: {e}")
-    finally:
-        if driver: driver.quit()
-            
-    return fmkorea_titles, stocktwits_titles, [], yahoo_titles
-
-# ... 이후 메인 실행 로직은 동일하게 사용 ...
+        # 깃허브 Secrets에서 불러오기
+        json_str = os.getenv("GSPREAD_JSON")
+        if not json_str:
+            print("❌ G
