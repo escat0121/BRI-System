@@ -18,6 +18,7 @@ jobs:
       - name: Run script
         run: python global_bri_master.py
         env:
-          # 여기서 GSPREAD_JSON 변수를 전달해줘야 합니다!
+
+         
           GSPREAD_JSON: ${{ secrets.GSPREAD_JSON }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
